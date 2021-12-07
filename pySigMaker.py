@@ -670,7 +670,8 @@ class SigMaker:
         if not self.__plugin.Settings.alignedPattern:
             if not self._addRefs(startea):
                 return False
-
+                
+            self.__plugin.log('Generating regular function pattern', LogOptions.LOG_RESULT)
             bHaveUniqueSig = False
 
             while not bHaveUniqueSig and len(self.Sigs):
@@ -693,7 +694,10 @@ class SigMaker:
 
                 bHaveUniqueSig = self._haveUniqueSig()
         else:
-            self.__plugin.log('Generating aligned function pattern for %s' % self.SIMDType[simd_size], LogOptions.LOG_RESULT)
+            if simd_size != 0:
+                self.__plugin.log('Generating aligned function pattern for %s' % self.SIMDType[simd_size], LogOptions.LOG_RESULT)
+            else:
+                self.__plugin.log('Generating regular function pattern', LogOptions.LOG_RESULT)
 
             sig = SigCreateStruct()
             sig.dwStartAddress = startea
@@ -731,7 +735,7 @@ class SigMaker:
         startea = startea - self.Offset
 
         if simd_size != 0:
-            self.__plugin.log('Generating aligned function pattern for %s' % self.SIMDType[simd_size], LogOptions.LOG_RESULT)
+            self.__plugin.log('Generating aligned selected  pattern for %s' % self.SIMDType[simd_size], LogOptions.LOG_RESULT)
             while True:
                 startea -= 1
                 self.BytesToSkip += 1
@@ -746,6 +750,8 @@ class SigMaker:
                 else:
                     if self._matchOperands(cmd.ea):
                         break
+        else:
+            self.__plugin.log('Generating regular selected pattern', LogOptions.LOG_RESULT)
 
         # A bad way to get sigable address, I can't think of a way to make it proper
         old_startea = startea
