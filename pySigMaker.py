@@ -366,9 +366,14 @@ class SigMaker:
     def __init__(self, plugin):
         self.__plugin = plugin
         self.Sigs = []
+        self.Offset = 0
+        self.BytesToSkip = 0
+        self.SIMDType = {8:"uint64_t", 32:"__m256i", 64:"__m512i"}
 
     def _reset(self):
         self.Sigs = []
+        self.Offset = 0
+        self.BytesToSkip = 0
 
     def _addBytesToSig(self, sigIndex, ea, size):
 
@@ -435,6 +440,7 @@ class SigMaker:
         count = idaapi.decode_insn(cmd, sig.dwCurrentAddress)
 
         if count == 0 or cmd.size == 0:
+            self.__plugin.log('count == %d or cmd.size == %d' % (count, cmd.size), LogOptions.LOG_ERROR)
             return False
 
         if cmd.size < 5:
@@ -533,6 +539,8 @@ class SigMaker:
             while sig.sig[-1] == '?':
                 sig.sig = sig.sig[:-1]
 
+            sig.sig = sig.sig[self.BytesToSkip:]
+
             if sig.bUnique:
 
                 sigLen = len(sig.sig)
@@ -575,12 +583,14 @@ class SigMaker:
 
         txt = ''
 
+        strOffset = " (aligned_offest: +0x%X)" % self.Offset
+
         if sig.eType == PatternType.PT_DIRECT:
-            txt = 'result: matches @ 0x%X, sig direct: %s' % (ea, strSig)
+            txt = 'result: matches @ 0x%X, sig direct: %s%s' % (ea, strSig, strOffset if self.Offset != 0 else "")
         elif sig.eType == PatternType.PT_FUNCTION:
-            txt = 'result: matches @ 0x%X, sig function: (+0x%X) %s' % (ea, startea - sig.dwStartAddress, strSig)
+            txt = 'result: matches @ 0x%X, sig function: (+0x%X) %s%s' % (ea, startea - sig.dwStartAddress, strSig, strOffset if self.Offset != 0 else "")
         elif sig.eType == PatternType.PT_REFERENCE:
-            txt = 'result: matches @ 0x%X, sig reference: %s' % (ea, strSig)
+            txt = 'result: matches @ 0x%X, sig reference: %s%s' % (ea, strSig, strOffset if self.Offset != 0 else "")
 
         self.__plugin.log(txt, LogOptions.LOG_RESULT)
 
@@ -598,7 +608,7 @@ class SigMaker:
 
         return True
 
-    def AutoFunction(self) -> bool:
+    def AutoFunction(self, simd_size = 0) -> bool:
         """
             Generate shortest unique signature possible to current function
         """
@@ -616,39 +626,63 @@ class SigMaker:
             if not func or func.start_ea == BADADDR:
                 self.__plugin.log('Must be in a function.', LogOptions.LOG_ERROR)
                 return False
-            elif startea != func.start_ea:
-                startea = func.start_ea
-                self.__plugin.log('Using function: 0x%X' % startea, LogOptions.LOG_DEBUG)
+            
+            startea = func.start_ea
+            self.Offset = 0 if simd_size == 0 else startea % simd_size
+            startea = startea - self.Offset
+            self.__plugin.log('Using function: 0x%X' % startea, LogOptions.LOG_DEBUG)
 
-        if not self._addRefs(startea):
-            return False
+        if not self.__plugin.Settings.alignedPattern:
+            if not self._addRefs(startea):
+                return False
+                
+            self.__plugin.log('Generating regular function pattern', LogOptions.LOG_RESULT)
+            bHaveUniqueSig = False
 
-        iCount = 0
-        bHaveUniqueSig = False
+            while not bHaveUniqueSig and len(self.Sigs):
+            
+                for sigIndex in range(0, len(self.Sigs)):
 
-        while not bHaveUniqueSig and len(self.Sigs):
+                    if len(self.Sigs[sigIndex].sig) < self.__plugin.Settings.maxSigLength and self._addToSig(sigIndex):
+                        if len(self.Sigs[sigIndex].sig) > 5:
+                            self.Sigs[sigIndex].bUnique = BinQuery(' '.join(self.Sigs[sigIndex].sig), QueryTypes.QUERY_UNIQUE)
+                    else:
+                        #return False
+                        if sigIndex == 0:
+                            self.Sigs = self.Sigs[1:]
+                        elif sigIndex == len(self.Sigs) - 1:
+                            self.Sigs = self.Sigs[:-1]
+                        else:
+                            self.Sigs = self.Sigs[:sigIndex] + self.Sigs[sigIndex+1:]
 
-            for sigIndex in range(0, len(self.Sigs)):
+                        sigIndex = sigIndex - 1
 
-                if len(self.Sigs[sigIndex].sig) < self.__plugin.Settings.maxSigLength and self._addToSig(sigIndex):
+                bHaveUniqueSig = self._haveUniqueSig()
+        else:
+            if simd_size != 0:
+                self.__plugin.log('Generating aligned function pattern for %s' % self.SIMDType[simd_size], LogOptions.LOG_RESULT)
+            else:
+                self.__plugin.log('Generating regular function pattern', LogOptions.LOG_RESULT)
+
+            sig = SigCreateStruct()
+            sig.dwStartAddress = startea
+            sig.dwCurrentAddress = startea
+            sig.eType = PatternType.PT_DIRECT
+
+            self.Sigs.append(sig)
+
+            sigIndex = 0
+            while not self.Sigs[sigIndex].bUnique and len(self.Sigs[sigIndex].sig) < self.__plugin.Settings.maxSigLength:
+                if self._addToSig(sigIndex):
                     if len(self.Sigs[sigIndex].sig) > 5:
                         self.Sigs[sigIndex].bUnique = BinQuery(' '.join(self.Sigs[sigIndex].sig), QueryTypes.QUERY_UNIQUE)
                 else:
-                    #return False
-                    if sigIndex == 0:
-                        self.Sigs = self.Sigs[1:]
-                    elif sigIndex == len(self.Sigs) - 1:
-                        self.Sigs = self.Sigs[:-1]
-                    else:
-                        self.Sigs = self.Sigs[:sigIndex] + self.Sigs[sigIndex+1:]
-
-                    sigIndex = sigIndex - 1
-
-            bHaveUniqueSig = self._haveUniqueSig()
+                    self.__plugin.log('Unable to create aligned signature for size "%d" at current function' % simd_size, LogOptions.LOG_ERROR)
+                    return False
 
         return self._chooseSig()
 
-    def AutoAddress(self) -> bool:
+    def AutoAddress(self, simd_size = 0) -> bool:
         """
             Rather than create a sig from selection this
             gets current ea from screen and then creates
@@ -661,6 +695,35 @@ class SigMaker:
         self._reset()
 
         startea = idc.get_screen_ea()
+        selected_startea = idc.get_screen_ea()
+        self.Offset = 0 if simd_size == 0 else startea % simd_size
+        startea = startea - self.Offset
+
+        if simd_size != 0:
+            self.__plugin.log('Generating aligned selected  pattern for %s' % self.SIMDType[simd_size], LogOptions.LOG_RESULT)
+            while True:
+                startea -= 1
+                self.BytesToSkip += 1
+
+                cmd = idaapi.insn_t()
+                cmd.size = 0
+                count = idaapi.decode_insn(cmd, startea)
+                if count == 0 or cmd.size == 0:
+                    continue
+                if cmd.size < 5:
+                    break
+                else:
+                    if self._matchOperands(cmd.ea):
+                        break
+        else:
+            self.__plugin.log('Generating regular selected pattern', LogOptions.LOG_RESULT)
+
+        # A bad way to get sigable address, I can't think of a way to make it proper
+        old_startea = startea
+        ida_kernwin.jumpto(startea)
+        startea = idc.get_screen_ea()
+        self.BytesToSkip += old_startea - startea
+
         if startea in [0, BADADDR]:
             self.__plugin.log('Click on address you want sig for.', LogOptions.LOG_ERROR)
             return False
@@ -672,17 +735,17 @@ class SigMaker:
 
         self.Sigs.append(sig)
 
-        while not self.Sigs[0].bUnique and len(self.Sigs[0].sig) < self.__plugin.Settings.maxSigLength:
-
-            sigIndex = 0
+        sigIndex = 0
+        while not self.Sigs[sigIndex].bUnique and len(self.Sigs[sigIndex].sig) < self.__plugin.Settings.maxSigLength:
             if self._addToSig(sigIndex):
                 if len(self.Sigs[sigIndex].sig) > 5:
                     self.Sigs[sigIndex].bUnique = BinQuery(' '.join(self.Sigs[sigIndex].sig), QueryTypes.QUERY_UNIQUE)
             else:
-                self.__plugin.log('Unable to create sig at selected address', LogOptions.LOG_ERROR)
+                self.__plugin.log('Unable to create sig at selected address 0x%X' % startea, LogOptions.LOG_ERROR)
                 return False
 
         self._chooseSig()
+        ida_kernwin.jumpto(selected_startea)
 
 #
 #
@@ -787,9 +850,17 @@ class PluginGui(idaapi.PluginForm):
 
     def _sigCurrentFunction(self):
         self.__plugin.SigMaker.AutoFunction()
+        if self.__plugin.Settings.alignedPattern:
+            self.__plugin.SigMaker.AutoFunction(8)  # uint64_t
+            self.__plugin.SigMaker.AutoFunction(32) # Avx2
+            self.__plugin.SigMaker.AutoFunction(64) # Avx512
 
     def _sigAtCursor(self):
         self.__plugin.SigMaker.AutoAddress()
+        if self.__plugin.Settings.alignedPattern:
+            self.__plugin.SigMaker.AutoAddress(8)
+            self.__plugin.SigMaker.AutoAddress(32)
+            self.__plugin.SigMaker.AutoAddress(64)
 
     def _logLevelChanged(self, index):
         self.__plugin.Settings.LogLevel = index
@@ -807,6 +878,17 @@ class PluginGui(idaapi.PluginForm):
             self.__plugin.Settings.bOnlyReliable = False
         else:
             self.__plugin.Settings.bOnlyReliable = True
+
+        self.__plugin.Settings.save()
+
+    def _alignedPatternhecked(self, checkedState):
+        #
+        # Checkboxes can be tristate so passed arg is not a bool
+        # 
+        if checkedState == QtCore.Qt.Unchecked: 
+            self.__plugin.Settings.alignedPattern = False
+        else:
+            self.__plugin.Settings.alignedPattern = True
 
         self.__plugin.Settings.save()
 
@@ -954,12 +1036,21 @@ class PluginGui(idaapi.PluginForm):
         self.safeData = QtWidgets.QCheckBox()
         self.safeData.setTristate(False)
 
+        self.alignedPattern = QtWidgets.QCheckBox()
+        self.alignedPattern.setTristate(False)
+
         if self.__plugin.Settings.bOnlyReliable:
             self.safeData.setCheckState(QtCore.Qt.Checked)
         else:
             self.safeData.setCheckState(QtCore.Qt.Unchecked)
 
+        if self.__plugin.Settings.alignedPattern:
+            self.alignedPattern.setCheckState(QtCore.Qt.Checked)
+        else:
+            self.alignedPattern.setCheckState(QtCore.Qt.Unchecked)
+
         self.safeData.stateChanged.connect(self._safeDataChecked)
+        self.alignedPattern.stateChanged.connect(self._alignedPatternhecked)
 
         if HOTKEY_CONFLICT:
             self.archiveBtn = QtWidgets.QPushButton('Archive SigMaker-x64')
@@ -968,6 +1059,7 @@ class PluginGui(idaapi.PluginForm):
         formLayout.addRow('Output', self.logOpt)
         formLayout.addRow('Sig Choice', self.sigSelectorOpt)
         formLayout.addRow('Reliable Data Only', self.safeData)
+        formLayout.addRow('Generate aligned pattern', self.alignedPattern)
 
         layout.addLayout(formLayout)
 
@@ -1099,6 +1191,9 @@ class PluginSettings:
 
         # default hot key
         self.hotkey = PLUGIN_HOTKEY
+
+        # Generate aligned pattern
+        self.alignedPattern = False
 
         # form info
         self.x = -1
