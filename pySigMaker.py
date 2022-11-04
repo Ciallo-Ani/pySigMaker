@@ -221,7 +221,7 @@ def Ida2Code(sig) -> str:
 
     for entry in sig.split(' '):
         if entry == '?':
-            patt = patt + '\\x00'
+            patt = patt + '\\x2A'
             mask = mask + '?'
         else:
             patt = patt + '\\x%s' % entry
@@ -292,7 +292,8 @@ def Code2Ida(patt, mask=None) -> str:
                 pattern.append('%02X' % p[i])
             else:
                 pattern.append('?')
-        elif p[i] > 0:
+        elif p[i] > 0 and p[i] != 42:
+            # 42 is 0x2A
             pattern.append('%02X' % p[i])
         else:
             pattern.append('?')
@@ -811,7 +812,7 @@ class PluginGui(idaapi.PluginForm):
         patt = self.patt.currentText()
         mask = self.mask.text()
 
-        sig  = ''
+        sig = ''
         st = GetSigType(patt)
 
         if st == SigType.SIG_CODE:
